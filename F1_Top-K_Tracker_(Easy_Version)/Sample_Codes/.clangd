@@ -1,0 +1,10 @@
+CompileFlags:
+  Add:
+    - -Iinclude
+    - -std=c++20
+    - -Wall
+    - -Wextra
+    - -Wsign-conversion
+    - -Wconversion
+    - -Weffc++
+    - -pedantic-errors
