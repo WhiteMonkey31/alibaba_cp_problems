@@ -8,13 +8,13 @@
 #include <set>
 
 const int MAX_QUERIES {30};   // maximum number of queries allowed for each permutation
-const int MAX_K_TYPE_1_2 {5};  // query indices limit for query type 1 & 2 // should be 60 ideally
-const int MAX_K_TYPE_3_4 {7};  // query indices limit for query type 1 & 2 // should be 300 ideally
+const int MAX_K_TYPE_1_2 {60};  // query indices limit for query type 1 & 2 // should be 60 ideally
+const int MAX_K_TYPE_3_4 {300};  // query indices limit for query type 1 & 2 // should be 300 ideally
 
 
 
 int main() {
-    const int n = 10; // fixed size for prototype permutation // should be ideally 845
+    const int n {845}; // fixed size for prototype permutation // should be ideally 845
     std::vector<int> p(n); // the hidden permutation
 
     // Fill p with 1 to n 
@@ -23,7 +23,7 @@ int main() {
     }
 
     // Shuffle with fixed seed for deterministic behavior
-    std::mt19937 rng(42); // any fixed number for reproducibility
+    std::mt19937 rng(42); // any fixed number for reproducibility, put 42 or any number in () to produce same permutaion again and again for debugging 
     std::shuffle(p.begin(), p.end(), rng); // shuffled th permutation p randomly.   
 
     // Create position array: pos[i] = position of value i (0-based)
