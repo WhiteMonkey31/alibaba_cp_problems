@@ -92,16 +92,19 @@
 #include <vector>
 #include <algorithm>
 #include <random>
+#include <string>
+#include <sstream>
+#include <set>
 
+const int MAX_QUERIES {30};   // maximum number of queries allowed for each permutation
+const int MAX_K_TYPE_1_2 {5};  // query indices limit for query type 1 & 2 // should be 60 ideally
+const int MAX_K_TYPE_3_4 {7};  // query indices limit for query type 1 & 2 // should be 300 ideally
 
-const int MAX_K_TYPE_1_2 = 5;  // query indices limit for query type 1 & 2 // should be 60 ideally
-const int MAX_K_TYPE_3_4 = 7;  // query indices limit for query type 1 & 2 // should be 300 ideally
-bool used_type_3_or_4 = false;  // enforce one-time rule of query 3 and 4
 
 
             // function prototypes for handling different query types
-void handle_query_by_value(const std::vector<int>& p, int m, const std::vector<int>& indices, int max_k);   // for query type 1 and 3
-void handle_query_by_position(const std::vector<int>& pos, int m, const std::vector<int>& indices, int max_k);   // for query type 2 and 4
+// void handle_query_by_value(const std::vector<int>& p, int m, const std::vector<int>& indices, int max_k);   // for query type 1 and 3
+// void handle_query_by_position(const std::vector<int>& pos, int m, const std::vector<int>& indices, int max_k);   // for query type 2 and 4
 
 
 
@@ -134,37 +137,152 @@ int main() {
     std::cout << "\n";
 
 
+    int total_queries{0};   // to calculate the number of queries entered
+    bool used_type_3_or_4 {false};  // enforce one-time rule of query 3 and 4
 
-    int query_type{};  // for checking the query type of the query
-    int m{};        // for inputting the number of indices a user wants to enter
-    std::cout<<"Enter Query Type (1-2): ";
-    std::cin >> query_type;
-    std::cout<<"Enter Number of Indices (m):";
-    std::cin>>m;
-    std::vector<int> indices(m);
-    for (int i = 0; i < m; ++i) {   // for inputting the number of indices entered.
-        std::cin >> indices[i];
+    bool invalid_query = false;  // for checking invalid query and skipping it
+    std::string line;
+    std::cout<<"Enter Query: ";
+    std::cout.flush();
+    while (std::getline(std::cin, line)) {  // keep taking query in loop until 30 queries
+        std::stringstream ss(line);  // ss is made for validating query if valid query has been passsed or not?
+        std::string cmd;
+        ss >> cmd;   // forwarding first character to cmd for validation
+
+        if (cmd == "!") {  // if query has first character (!) instead of 1-4, then it means the user is trying to guess the number instead of forwarding query
+            std::vector<int> guess(n);
+            for (int i = 0; i < n; ++i)
+                ss >> guess[i];
+            if (guess == p) {   // if guess is correct
+                std::cout << "Correct!" << std::endl;
+                break;
+            } else {
+                std::cout << "Wrong!" << std::endl;
+                std::cout.flush();
+                invalid_query=true;
+                // break;
+            }
+        }
+
+        int type = std::stoi(cmd);  // for validating the query type by first charachter (1-4)
+        if (type < 1 || type > 4) {
+            std::cout << "Invalid query type.\n";
+            std::cout.flush();
+            continue;
+        }
+
+        int m;
+        ss >> m;  // for validating the m that should be greater than 0 and less than number of permutation (n)
+        if (m <= 0 || m > n) {
+            std::cout << "Invalid m.\n";
+            std::cout.flush();
+            continue;
+        }
+
+        std::vector<int> indices(m);  // the indices sent in query will be stored here
+        std::set<int> unique_check;   // for checking the uniqueness of the indices sent in the query
+        for (int i = 0; i < m; ++i) {
+            ss >> indices[i];
+            if (indices[i] < 1 || indices[i] > n) {  // checking range of indices
+                std::cout << "Index out of range.\n";
+                std::cout.flush();
+                invalid_query = true;
+            }
+            if (!unique_check.insert(indices[i]).second) {   // checking uniqueness of indices
+                std::cout << "Duplicate index.\n";
+                std::cout.flush();
+                invalid_query = true;
+            }   
+        }
+
+       
+
+        // Enforce query limits
+        total_queries++;
+        if (total_queries > MAX_QUERIES) {
+            std::cout << "Query limit exceeded.\n";
+
+            break;
+        }
+        if ((type == 3 || type == 4) && used_type_3_or_4) {
+            std::cout << "Type 3 or 4 already used.\n";
+            std::cout.flush();
+            // break;
+            invalid_query=true;
+        }
+        if (type == 3 || type == 4) {
+            used_type_3_or_4 = true;
+        }
+          // allowing indices limit based on query type
+        int k = (type == 3 || type == 4) ? std::min(MAX_K_TYPE_3_4, m) : std::min(MAX_K_TYPE_1_2, m);
+        std::vector<int> values; // for temperory storing the values of th etop-k in unsorted form
+
+        if (type == 1 || type == 3) {
+            for (int i : indices) {
+                values.push_back(p[i - 1]); // put th emaching indices top-k elements in values
+            }
+        } else {
+            for (int i : indices) {
+                values.push_back(pos[i]);
+            }
+        }
+
+        // sorting the top_k values to give output to user
+        std::sort(values.begin(), values.end(), std::greater<int>());
+        std::vector<int> top_k(values.begin(), values.begin() + k);
+        std::sort(top_k.begin(), top_k.end()); // Output must be increasing
+
+            // outputting the query top-k 
+        for (int x : top_k){
+            std::cout << x << " ";
+            std::cout.flush();
+        }
+        std::cout << std::endl;
+        std::cout.flush();
+
+        if(total_queries<30){
+            std::cout<<"Enter Query: ";
+            std::cout.flush();
+        }
+
+        if(invalid_query){
+            continue;
+        }
+    // next_query:
+        continue;
     }
 
 
-            // checking query type based on input data
-    if (query_type == 1) {
-        handle_query_by_value(p, m, indices,MAX_K_TYPE_1_2); // p:permutation, m:number of indices, indices:actual indies, MAX_K_TYPE_1_2: 60 indicdies that are allowed
-    }else if (query_type == 2){
-        handle_query_by_position(pos, m, indices,MAX_K_TYPE_1_2);
-    } else if (query_type == 3) {
-        if (used_type_3_or_4) { 
-            std::cerr << "Type 3 or 4 already used!\n"; exit(1); 
-        }
-        used_type_3_or_4 = true;   // will turn to true after one time use and prevent 2nd time use
-        handle_query_by_value(p, m, indices, MAX_K_TYPE_3_4);
-    } else if (query_type == 4) {
-        if (used_type_3_or_4) {
-            std::cerr << "Type 3 or 4 already used!\n"; exit(1);   // exits if the query 3 or 4 is used 2nd time.
-        }
-        used_type_3_or_4 = true;
-        handle_query_by_position(pos, m, indices, MAX_K_TYPE_3_4);
-    }
+    // int query_type{};  // for checking the query type of the query
+    // int m{};        // for inputting the number of indices a user wants to enter
+    // std::cout<<"Enter Query Type (1-2): ";
+    // std::cin >> query_type;
+    // std::cout<<"Enter Number of Indices (m):";
+    // std::cin>>m;
+    // std::vector<int> indices(m);
+    // for (int i = 0; i < m; ++i) {   // for inputting the number of indices entered.
+    //     std::cin >> indices[i];
+    // }
+
+
+    //         // checking query type based on input data
+    // if (query_type == 1) {
+    //     handle_query_by_value(p, m, indices,MAX_K_TYPE_1_2); // p:permutation, m:number of indices, indices:actual indies, MAX_K_TYPE_1_2: 60 indicdies that are allowed
+    // }else if (query_type == 2){
+    //     handle_query_by_position(pos, m, indices,MAX_K_TYPE_1_2);
+    // } else if (query_type == 3) {
+    //     if (used_type_3_or_4) { 
+    //         std::cerr << "Type 3 or 4 already used!\n"; exit(1); 
+    //     }
+    //     used_type_3_or_4 = true;   // will turn to true after one time use and prevent 2nd time use
+    //     handle_query_by_value(p, m, indices, MAX_K_TYPE_3_4);
+    // } else if (query_type == 4) {
+    //     if (used_type_3_or_4) {
+    //         std::cerr << "Type 3 or 4 already used!\n"; exit(1);   // exits if the query 3 or 4 is used 2nd time.
+    //     }
+    //     used_type_3_or_4 = true;
+    //     handle_query_by_position(pos, m, indices, MAX_K_TYPE_3_4);
+    // }
 
 
 
@@ -173,52 +291,52 @@ int main() {
 }
 
 
-    // function for handling query type 1 & 3
-void handle_query_by_value(const std::vector<int>& p, int m, const std::vector<int>& indices, int max_k) {
+//     // function for handling query type 1 & 3
+// void handle_query_by_value(const std::vector<int>& p, int m, const std::vector<int>& indices, int max_k) {
 
-                //p is the hidden permutation,
-                // m is the number of indices,
-                // indices are those individual indices that are sent to the judge/program for checking.
-                // max_k is the max number of queries allowed by query type like 60 or 300
+//                 //p is the hidden permutation,
+//                 // m is the number of indices,
+//                 // indices are those individual indices that are sent to the judge/program for checking.
+//                 // max_k is the max number of queries allowed by query type like 60 or 300
 
-    std::vector<int> values;
-    for (int idx : indices) {
-        values.push_back(p[idx - 1]);  // convert to 0-based index
-    }
+//     std::vector<int> values;
+//     for (int idx : indices) {
+//         values.push_back(p[idx - 1]);  // convert to 0-based index
+//     }
 
-    std::sort(values.begin(), values.end(), std::greater<int>()); // sort in descending order 
-                                                                                    // it is done in desending order so that the extra number of indices don't exceed the allowed limit and can be removed.
-    int k = std::min(max_k, m);                                 // MAX_K_TYPE_1_2 is the max number of indices allowed for type 1 and 2 query
-    std::vector<int> top_k(values.begin(), values.begin() + k);         // top_k are the values that will be send back to the user/screen in reply of query
-    std::sort(top_k.begin(), top_k.end()); // output must be in increasing order
-    for (int val : top_k) {
-        std::cout << val << " ";  // prints the top_k values to the screen.
-    }
-    std::cout << std::endl;
-}
+//     std::sort(values.begin(), values.end(), std::greater<int>()); // sort in descending order 
+//                                                                                     // it is done in desending order so that the extra number of indices don't exceed the allowed limit and can be removed.
+//     int k = std::min(max_k, m);                                 // MAX_K_TYPE_1_2 is the max number of indices allowed for type 1 and 2 query
+//     std::vector<int> top_k(values.begin(), values.begin() + k);         // top_k are the values that will be send back to the user/screen in reply of query
+//     std::sort(top_k.begin(), top_k.end()); // output must be in increasing order
+//     for (int val : top_k) {
+//         std::cout << val << " ";  // prints the top_k values to the screen.
+//     }
+//     std::cout << std::endl;
+// }
 
 
-        // function for handling query type 2 and 4
-void handle_query_by_position(const std::vector<int>& pos, int m, const std::vector<int>& indices, int max_k) {
+//         // function for handling query type 2 and 4
+// void handle_query_by_position(const std::vector<int>& pos, int m, const std::vector<int>& indices, int max_k) {
 
-                                    // pos is the index of hidden permutation p.
-                                    // m is the number of indices that are given or entered.
-                                    // indices are those individual values/input that are given to the system as a query, that comes after m in query
-                                    // max_k is the max number of queries allowed by query type like 60 or 300
-    std::vector<int> positions;
-    for (int val : indices) {
-        positions.push_back(pos[val]);  // pos is already 1-based
-    }
+//                                     // pos is the index of hidden permutation p.
+//                                     // m is the number of indices that are given or entered.
+//                                     // indices are those individual values/input that are given to the system as a query, that comes after m in query
+//                                     // max_k is the max number of queries allowed by query type like 60 or 300
+//     std::vector<int> positions;
+//     for (int val : indices) {
+//         positions.push_back(pos[val]);  // pos is already 1-based
+//     }
 
-    std::sort(positions.begin(), positions.end(), std::greater<int>());  // sorts in desending order
-    int k = std::min(max_k, m);                                       // checking against the total number of indices allowed by query type 1 and 2
-    std::vector<int> top_k(positions.begin(), positions.begin() + k);      // top_k contains the top-k elements selected from hidden permutation p
-    std::sort(top_k.begin(), top_k.end()); // output must be in increasing order
-    for (int val : top_k) {
-        std::cout << val << " ";
-    }
-    std::cout << std::endl;
-}
+//     std::sort(positions.begin(), positions.end(), std::greater<int>());  // sorts in desending order
+//     int k = std::min(max_k, m);                                       // checking against the total number of indices allowed by query type 1 and 2
+//     std::vector<int> top_k(positions.begin(), positions.begin() + k);      // top_k contains the top-k elements selected from hidden permutation p
+//     std::sort(top_k.begin(), top_k.end()); // output must be in increasing order
+//     for (int val : top_k) {
+//         std::cout << val << " ";
+//     }
+//     std::cout << std::endl;
+// }
 
 
 
