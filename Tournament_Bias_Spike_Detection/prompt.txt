@@ -1,0 +1,25 @@
+Problem Description:
+You are given a sequence of N integers. A subsequence is defined as a sequence that can be derived from the given sequence by deleting zero or more elements without changing the order of the remaining elements.
+
+Your task is to determine the maximum possible sum of a subsequence that satisfies the following condition:
+- No two elements in the subsequence have the same remainder when divided by K.
+
+Input Format:
+- The first line contains two integers N and K.
+- The second line contains N space-separated integers representing the sequence.
+
+Constraints:
+- 1 ≤ N ≤ 2×10^5
+- 1 ≤ K ≤ N
+- −10^9 ≤ sequence[i] ≤ 10^9
+
+Output Format:
+- Print a single integer representing the maximum possible sum of a subsequence that satisfies the given condition.
+
+Example:
+Input:
+5 3
+1 7 4 2 5
+
+Output:
+14

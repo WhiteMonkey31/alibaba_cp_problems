@@ -1,0 +1,25 @@
+You are given a tree (an undirected connected graph with n nodes and n-1 edges). Each node has a magic portal with a unique frequency f[i]. From node u, you can teleport to another node v if and only if gcd(f[u], f[v]) > 1.
+
+You can also walk across tree edges with a cost of 1 per edge. Teleportation costs 0.
+
+Your task is to find the minimum total cost to go from node 1 to node n. could you provide a simple example of this problem and a c++ code to implemet it
+
+Input Format:
+
+First line: An integer n (2 ≤ n ≤ 10^5) — number of nodes
+
+Second line: n space-separated integers f[i] (1 ≤ f[i] ≤ 10^6) — frequencies
+
+Next n - 1 lines: two integers u and v — undirected edges of the tree.
+
+Output Format:
+
+Single integer — the minimum cost from node 1 to node n.
+
+Constraints:
+
+Each frequency is a positive integer ≤ 10^6.
+
+The tree is connected.
+
+Teleportation graph is dynamic and non-explic
