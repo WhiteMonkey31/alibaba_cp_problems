@@ -1,7 +1,7 @@
 # Tournament Bias Spike Detection
 
 **Time Limit:** 5 seconds  
-**Memory Limit:** 512 megabytes  
+**Memory Limit:** 256 megabytes  
 
 ## Problem Statement
 You are analyzing scores from `n` games. Each score `a_i` is an integer.  
