@@ -1,9 +1,37 @@
 #include <iostream>
-#include<vector>
-#include<cmath>
-#include<algorithm>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <vector>
+#include <cmath>
+#include <algorithm>
 using namespace std;
+using namespace chrono;
 
+atomic<bool> should_stop(false);
+
+class IORedirector {
+    stringstream input, output;
+    streambuf *old_cin, *old_cout;
+public:
+    IORedirector(const string& in) : input(in) {
+        old_cin = cin.rdbuf(input.rdbuf());
+        old_cout = cout.rdbuf(output.rdbuf());
+    }
+    ~IORedirector() {
+        cin.rdbuf(old_cin);
+        cout.rdbuf(old_cout);
+    }
+    string get_output() { return output.str(); }
+};
+
+// =====================================================
+// Your solution inside solve_optimal()
+// =====================================================
 struct AccSegment {
     long double t; // start time
     long double a; // acceleration
@@ -17,18 +45,7 @@ struct Robot {
 
 const long double EPS = 1e-12L;
 const long double D = 24.0L;
-const long double JITTER_A = 2.0L; // cm
-const long double JITTER_W = 2.0L; // rad/s
 
-// Evaluate acceleration at time t
-long double get_acc(const Robot &r, long double t) {
-    if(r.segments.empty()) return 0.0L;
-    for(size_t i=1;i<r.segments.size();i++)
-        if(t < r.segments[i].t) return r.segments[i-1].a;
-    return r.segments.back().a;
-}
-
-// Quadratic solver: a*t^2 + b*t + c = 0
 vector<long double> solve_quadratic(long double a, long double b, long double c) {
     vector<long double> roots;
     if(fabsl(a) < EPS) {
@@ -47,7 +64,6 @@ vector<long double> solve_quadratic(long double a, long double b, long double c)
     return roots;
 }
 
-// Check collision for a segment analytically (without brute-force)
 bool collide_segment(long double p1, long double v1, long double a1,
                      long double p2, long double v2, long double a2,
                      long double t0, long double t1) {
@@ -64,7 +80,8 @@ bool collide_segment(long double p1, long double v1, long double a1,
     roots.push_back(t0); roots.push_back(t1);
 
     sort(roots.begin(), roots.end());
-    roots.erase(unique(roots.begin(), roots.end(), [](long double x, long double y){return fabsl(x-y)<1e-12;}), roots.end());
+    roots.erase(unique(roots.begin(), roots.end(),
+                       [](long double x, long double y){return fabsl(x-y)<1e-12;}), roots.end());
 
     auto f = [&](long double t){
         return dy + dv*(t-t0) + A*(t-t0)*(t-t0);
@@ -86,11 +103,10 @@ bool collide_segment(long double p1, long double v1, long double a1,
     return false;
 }
 
-int main(){
-    ios::sync_with_stdio(false);
-    cin.tie(nullptr);
+string solve_optimal(const string& input_str) {
+    IORedirector redirector(input_str);
 
-    int N,M;
+    int N, M;
     long double T;
     cin >> N >> M >> T;
     vector<Robot> robots(N+M);
@@ -142,5 +158,71 @@ int main(){
     }
 
     cout << collisions << "\n";
+    return redirector.get_output();
+}
+
+// =====================================================
+// Template utility functions
+// =====================================================
+int find_next_file_number() {
+    int next_num = 1;
+    while (true) {
+        string filename = "test_cases/" + to_string(next_num) + ".in";
+        ifstream file(filename);
+        if (!file.good()) return next_num;
+        next_num++;
+    }
+}
+
+void run_solution(const string& input_file, const string& output_file, int test_num, int file_num) {
+    ifstream fin(input_file);
+    stringstream buffer; buffer << fin.rdbuf(); fin.close();
+    string result = solve_optimal(buffer.str());
+    ofstream fout(output_file); fout << result; fout.close();
+    cout << "Generated test " << test_num << " (file " << file_num << ")\n";
+}
+
+void generate_test_case(int test_num, int file_num) {
+    int N = rand() % 5 + 1; // 1..5 robots type 0
+    int M = rand() % 5 + 1; // 1..5 robots type 1
+    long double T = (rand() % 20 + 5); // 5..25 seconds
+
+    string input_file = "test_cases/" + to_string(file_num) + ".in";
+    ofstream fin(input_file);
+
+    fin << N << " " << M << " " << T << "\n";
+
+    for (int i = 0; i < N+M; i++) {
+        int type = (i < N ? 0 : 1);
+        long double pos = (rand() % 2000 - 1000); // -1000..1000 cm
+        long double vel = (rand() % 200 - 100) / 10.0; // -10..10 cm/s
+        int k = rand() % 3 + 1; // 1..3 segments
+        fin << type << " " << pos << " " << vel << " " << k << "\n";
+        long double t_prev = 0;
+        for (int j = 0; j < k; j++) {
+            t_prev += (rand() % 5 + 1); // segment start time
+            long double a = (rand() % 200 - 100) / 10.0; // -10..10 cm/s^2
+            fin << t_prev << " " << a << "\n";
+        }
+    }
+
+    fin.close();
+
+    string output_file = "test_cases/" + to_string(file_num) + ".out";
+    run_solution(input_file, output_file, test_num, file_num);
+}
+
+int main() {
+    srand(time(0));
+    system("mkdir -p test_cases");
+
+    int start_file_num = find_next_file_number();
+    int num_tests = 50;
+    for (int test_num = 1; test_num <= num_tests; ++test_num) {
+        int file_num = start_file_num + test_num - 1;
+        generate_test_case(test_num, file_num);
+    }
+
+    cout << "Generated " << num_tests << " test cases.\n";
     return 0;
 }
