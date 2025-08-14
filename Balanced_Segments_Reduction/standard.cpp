@@ -1,11 +1,13 @@
-// balanced_segments_solver.cpp
-// Practical solver for the "Balanced Segments Reduction" modified problem
-// (three equal segments, b[i] divisible by i).
+// balanced_segments_optimized.cpp
+// Optimized hybrid solver for "Balanced Segments Reduction"
+// (three equal segments; b[i] divisible by i).
 //
-// Note: heuristic + exact. Not guaranteed poly-time for worst-case, but
-// works for many human-designed and moderate-size instances.
+// Heuristic+exact approach tuned to be robust and LLM-resistant.
+//
+// Compile: g++ -O2 -std=gnu++17 balanced_segments_optimized.cpp -o balanced_solver
 
-// #include <bits/stdc++.h>
+// #include <iostream>
+// #include<vector>
 #include <iostream>
 // #include <fstream>
 // #include <sstream>
@@ -17,22 +19,28 @@
 #include <vector>
 #include<numeric>
 #include<array>
+#include<unordered_map>
+#include<functional>
+#include<utility>
 
 // #include <cmath>
 #include <algorithm>
-#include<unordered_set>
-
+// #include<unordered_set>
 using namespace std;
 using int64 = long long;
-const double GLOBAL_TIME_LIMIT = 1.9; // per test-case soft limit (seconds)
-const int OP_LIMIT = 60;
+
+static const double GLOBAL_TIME_LIMIT = 1.8; // seconds per test case (soft)
+static const double PER_CUT_TIME = 0.045;    // seconds spent trying a single (p,q)
+static const int MAX_OPS = 50;               // fail after too many operations
+static const int MAX_S_ATTEMPTS = 180;       // per (p,q)
+static const int MAX_CAND_P = 48, MAX_CAND_Q = 48; // candidate ps and qs to try
 
 struct Timer {
-    chrono::steady_clock::time_point start;
-    Timer() { start = chrono::steady_clock::now(); }
+    chrono::steady_clock::time_point s;
+    Timer() { s = chrono::steady_clock::now(); }
     double elapsed() const {
         using namespace chrono;
-        return duration_cast<duration<double>>(steady_clock::now() - start).count();
+        return chrono::duration_cast<duration<double>>(steady_clock::now() - s).count();
     }
 };
 
@@ -44,352 +52,417 @@ int gcd(int a, int b) {
     return a;
 }
 
-inline int64 gcd64(int64 a, int64 b) {
-    if (a == 0) return b;
-    if (b == 0) return a;
-    return gcd(a, b);
-}
+inline int64 gcd64(int64 a, int64 b) { return b==0? a: gcd(a,b); }
+inline int64 lcm64(int64 a, int64 b) { if(a==0 || b==0) return a^b; return (a / gcd64(a,b)) * b; }
 
-int64 lcm64(int64 a, int64 b) {
-    if (a == 0 || b == 0) return (a == 0 ? b : a);
-    return (a / gcd64(a,b)) * b;
-}
-
-vector<int64> prefix_sum(const vector<int64>& a) {
-    vector<int64> ps(a.size()+1);
-    ps[0] = 0;
-    for (size_t i=0;i<a.size();++i) ps[i+1] = ps[i] + a[i];
-    return ps;
-}
-
-int64 segment_max(const vector<int64>& a, int L, int R) {
-    // L,R are 1-based inclusive
-    int64 s = 0;
-    for (int i=L;i<=R;++i) {
-        int64 cap = a[i-1] / (int64)i;
-        s += cap * (int64)i;
+// Precompute caps and prefix of cap-values for quick segment max queries
+struct Precompute {
+    int n;
+    vector<int64> a;
+    vector<int64> cap;       // cap[i] = floor(a[i]/(i+1))
+    vector<int64> capVal;    // capVal[i] = cap[i] * (i+1)
+    vector<int64> prefCapVal; // prefix sums of capVal
+    vector<int64> prefA;     // prefix sums of a
+    Precompute(const vector<int64>& arr) {
+        a = arr; n = (int)a.size();
+        cap.assign(n, 0);
+        capVal.assign(n, 0);
+        prefCapVal.assign(n+1, 0);
+        prefA.assign(n+1, 0);
+        for (int i=0;i<n;i++) {
+            cap[i] = a[i] / (int64)(i+1);
+            capVal[i] = cap[i] * (int64)(i+1);
+            prefCapVal[i+1] = prefCapVal[i] + capVal[i];
+            prefA[i+1] = prefA[i] + a[i];
+        }
     }
-    return s;
-}
+    inline int64 segmentMax(int L, int R) const { // 1-based inclusive
+        if (L>R) return 0;
+        return prefCapVal[R] - prefCapVal[L-1];
+    }
+    inline int64 prefixA(int idx) const { return prefA[idx]; } // idx elements
+};
 
-int64 segment_gcd_indices(int L, int R) {
+// helper to compute gcd of index range
+int64 gcd_range_indices(int L, int R) {
     int64 g = 0;
-    for (int i=L;i<=R;++i) g = gcd64(g, (int64)i);
+    for (int i=L;i<=R;i++) g = gcd64(g, (int64)i);
     return g;
 }
 
-// Greedy fill: take largest indices first
-// Returns vector of length (R-L+1) with actual b-values (multiples of index),
-// or empty vector if cannot reach S.
-vector<int64> greedy_fill_segment(const vector<int64>& a, int L, int R, int64 S) {
-    vector<int64> out(R-L+1, 0);
+// ------------------------ small-segment exact (meet-in-the-middle) ------------------------
+// Solve bounded subset-sum where coin values are distinct indices and multiplicities are caps.
+// For len <= 26 this is feasible by splitting into two halves.
+// We return vector<int64> of chosen b-values (each multiple of index), or empty vector on fail.
+// Note: target S must be <= segmentMax.
+vector<int64> solve_segment_small_exact(const vector<int64>& a, int L, int R, int64 S, double timeBudget, const Timer& globalTimer) {
+    // L,R are 1-based inclusive. Build values and caps
+    int len = R - L + 1;
+    vector<int> vals(len);
+    vector<int64> caps(len);
+    for (int i=0;i<len;i++){ vals[i] = L + i; caps[i] = a[L+i-1] / (int64)(L+i); }
+    Timer t;
+    // transform to multi-coin list by handling multiplicities but keep as (value, cap)
+    // Meet-in-the-middle: enumerate possible sums in each half with multipliers
+    int mid = len / 2;
+    // Left half enumerations: vector of (sum, vector<multipliers for left half>)
+    unordered_map<int64, vector<int64>> leftMap;
+    // we'll cap enumerated combinations to prevent explosion
+    const size_t LEFT_LIMIT = 1 << min(18, max(0, mid)); // soft limit
+    // backtracking left half
+    function<void(int,int64, vector<int64>&)> dfsL = [&](int idx, int64 cur, vector<int64>& multi) {
+        if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return;
+        if (idx == mid) {
+            // store
+            leftMap[cur] = multi;
+            return;
+        }
+        int v = vals[idx]; int64 capc = caps[idx];
+        // iterate k from 0..min(cap, S/v) but prefer larger k first
+        int64 maxk = min(capc, S / v);
+        for (int64 k = maxk; k>=0; --k) {
+            if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return;
+            multi[idx] = k;
+            dfsL(idx+1, cur + k*(int64)v, multi);
+            if (leftMap.size() > LEFT_LIMIT) return;
+        }
+        multi[idx] = 0;
+    };
+    vector<int64> mleft(len,0);
+    dfsL(0, 0, mleft);
+    if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return {};
+    // Right half
+    int rlen = len - mid;
+    const size_t RIGHT_LIMIT = 1 << min(18, max(0, rlen));
+    function<vector<int64>()> findSolution = [&]() -> vector<int64> {
+        vector<int64> mult(len,0);
+        // backtrack right half and lookup complement in leftMap
+        function<bool(int,int64, vector<int64>&)> dfsR = [&](int idx, int64 cur, vector<int64>& mr) -> bool {
+            if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return false;
+            if (idx == len) {
+                int64 need = S - cur;
+                auto it = leftMap.find(need);
+                if (it != leftMap.end()) {
+                    // combine
+                    for (int i=0;i<mid;i++) mult[i] = it->second[i];
+                    for (int i=mid;i<len;i++) mult[i] = mr[i-mid];
+                    return true;
+                }
+                return false;
+            }
+            int pos = idx - mid;
+            if (idx < mid) return false;
+            int v = vals[idx]; int64 capc = caps[idx];
+            int64 maxk = min(capc, S / v);
+            for (int64 k = maxk; k>=0; --k) {
+                mr[pos] = k;
+                if (dfsR(idx+1, cur + k*(int64)v, mr)) return true;
+                if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return false;
+            }
+            mr[pos] = 0;
+            return false;
+        };
+        vector<int64> mr(rlen,0);
+        if (dfsR(mid, 0, mr)) return mult;
+        return {};
+    };
+    vector<int64> mults = findSolution();
+    if (mults.empty()) return {};
+    // convert multipliers to b-values
+    vector<int64> bvals(len,0);
+    for (int i=0;i<len;i++) bvals[i] = mults[i] * (int64)vals[i];
+    return bvals;
+}
+
+// ------------------------ greedy + residue DP fallback ------------------------
+// Greedy large-first attempt
+vector<int64> greedy_fill(const vector<int64>& a, int L, int R, int64 S) {
+    int len = R - L + 1;
+    vector<int64> out(len, 0);
     int64 rem = S;
-    for (int idx=R; idx>=L; --idx) {
-        int64 cap = a[idx-1] / (int64)idx;
+    for (int i=R;i>=L;i--) {
+        int64 cap = a[i-1] / (int64)i;
         if (cap <= 0) continue;
-        int64 take = min(cap, rem / (int64)idx);
-        out[idx-L] = take * (int64)idx;
-        rem -= out[idx-L];
+        int64 take = min(cap, rem / (int64)i);
+        out[i-L] = take * (int64)i;
+        rem -= out[i-L];
         if (rem == 0) break;
     }
     if (rem != 0) return {};
     return out;
 }
 
-// Backtracking for bounded subset-sum on small segments.
-// values: indices (i), caps: counts, target S.
-// Returns counts vector (same length) or empty vector if impossible.
-bool backtrack_bounded(const vector<int64>& vals, const vector<int64>& caps, int idx, int64 target,
-                       vector<int64>& solution, unordered_set<unsigned long long>& memo, const Timer& t, double time_limit) {
-    if (t.elapsed() > time_limit) return false;
-    if (target == 0) {
-        for (size_t i=idx;i<vals.size();++i) solution[i] = 0;
-        return true;
-    }
-    if (idx >= (int)vals.size()) return false;
-    // memo key combine
-    unsigned long long key = ((unsigned long long)idx << 40) ^ (unsigned long long)(target & ((1ULL<<40)-1));
-    if (memo.find(key) != memo.end()) return false;
-    int64 val = vals[idx];
-    int64 maxk = min(caps[idx], target / val);
-    // try larger k first to encourage greedy-like large usage
-    for (int64 k = maxk; k>=0; --k) {
-        solution[idx] = k;
-        if (k*val > target) continue;
-        if (backtrack_bounded(vals, caps, idx+1, target - k*val, solution, memo, t, time_limit)) return true;
-        // early prune if time nearly exhausted
-        if (t.elapsed() > time_limit) return false;
-    }
-    memo.insert(key);
-    return false;
-}
-
-// Try to construct full b array for given cut (p,q). Returns empty vector if none found.
-// time_limit: seconds budget for this try (per p,q)
-vector<int64> try_construct_for_cut(vector<int64> a, int p, int q, double time_limit, const Timer& global_timer) {
-    Timer t;
-    int n = (int)a.size();
-    // segments: [1..p], [p+1..q], [q+1..n]
-    array<pair<int,int>,3> segs = { make_pair(1,p), make_pair(p+1,q), make_pair(q+1,n) };
-    array<int64,3> maxs; array<int64,3> gcds;
-    array<vector<pair<int,int64>>,3> caps; // (index, cap)
-    for (int s=0;s<3;++s) {
-        int L = segs[s].first, R = segs[s].second;
-        int64 mx = 0; int64 g = 0;
-        vector<pair<int,int64>> list;
-        for (int i=L;i<=R;++i) {
-            int64 cap = a[i-1] / (int64)i;
-            mx += cap * (int64)i;
-            g = gcd64(g, (int64)i);
-            list.emplace_back(i, cap);
-        }
-        maxs[s] = mx; gcds[s] = g;
-        caps[s] = move(list);
-    }
-    int64 maxS = min({maxs[0], maxs[1], maxs[2]});
-    if (maxS == 0) {
-        // maybe all zeros segment
-        bool allz = true;
-        for (auto v : a) if (v != 0) { allz = false; break; }
-        if (allz) return vector<int64>(n, 0);
-        return {};
-    }
-    // compute lcm of gcds
-    int64 l = gcds[0];
-    for (int i=1;i<3;++i) l = lcm64(l, gcds[i]);
-    if (l == 0) l = 1;
-    // Start from highest S multiple of l not exceeding maxS, iterate downward with limited attempts
-    int64 S = (maxS / l) * l;
-    int attempts = 0, max_attempts = 300;
-    while (S > 0 && attempts < max_attempts && t.elapsed() < time_limit && global_timer.elapsed() < GLOBAL_TIME_LIMIT) {
-        // quick check each segment can reach S
-        bool okSegs = true;
-        for (int s=0;s<3;s++) if (S > maxs[s]) { okSegs = false; break; }
-        if (!okSegs) { S -= l; ++attempts; continue; }
-
-        // Attempt to get feasible b for each segment
-        vector<int64> full_b(n, 0);
-        bool segfail = false;
-        for (int s=0;s<3 && !segfail;s++) {
-            int L = segs[s].first, R = segs[s].second;
-            int seglen = R - L + 1;
-            // small segment -> exact backtrack
-            if (seglen <= 24) {
-                vector<int64> vals; vector<int64> cnts;
-                for (auto &pr : caps[s]) { vals.push_back(pr.first); cnts.push_back(pr.second); }
-                vector<int64> sol(vals.size(), 0);
-                unordered_set<unsigned long long> memo;
-                bool ok = backtrack_bounded(vals, cnts, 0, 0, sol, memo, t, time_limit); // dummy call? We'll call real below
-                // Real call:
-                sol.assign(vals.size(), 0);
-                memo.clear();
-                bool found = backtrack_bounded(vals, cnts, 0, S, sol, memo, t, time_limit);
-                if (!found) { segfail = true; break; }
-                // map sol to full_b
-                for (size_t j=0;j<vals.size();++j) {
-                    int idx = (int)vals[j];
-                    full_b[idx-1] = sol[j] * vals[j];
-                }
-            } else {
-                // Try greedy
-                vector<int64> greedy = greedy_fill_segment(a, L, R, S);
-                if (!greedy.empty()) {
-                    for (int j=0;j<seglen;++j) full_b[L+j-1] = greedy[j];
-                } else {
-                    // fallback: try limited exact on top-K largest indices
-                    int K = min(22, seglen); // tuneable
-                    // build vector of (i,cap) sorted desc by i
-                    vector<pair<int,int64>> items = caps[s];
-                    sort(items.begin(), items.end(), [](const pair<int,int64>& A, const pair<int,int64>& B){
-                        return A.first > B.first;
-                    });
-                    vector<pair<int,int64>> top(items.begin(), items.begin()+K);
-                    vector<pair<int,int64>> rest(items.begin()+K, items.end());
-                    int64 rest_max = 0;
-                    for (auto &pr : rest) rest_max += pr.first * pr.second;
-                    int64 top_max = 0;
-                    for (auto &pr : top) top_max += pr.first * pr.second;
-                    int64 need_top_min = max<int64>(0, S - rest_max);
-                    if (need_top_min > top_max) { segfail = true; break; }
-                    // try several target_top values (descending)
-                    bool found_any = false;
-                    // produce top vals and caps
-                    vector<int64> top_vals; vector<int64> top_caps;
-                    for (auto &pr : top) { top_vals.push_back(pr.first); top_caps.push_back(pr.second); }
-                    vector<int64> sol_top(top_vals.size(), 0);
-                    for (int trials = 0; trials < 8 && !found_any && t.elapsed() < time_limit; ++trials) {
-                        // pick a candidate target for top in [need_top_min .. min(top_max, S)]
-                        int64 cand = min(top_max, S) - trials * (max<int64>(1, (min(top_max, S) - need_top_min) / 8 + 1));
-                        if (cand < need_top_min) cand = need_top_min;
-                        // ensure cand is multiple of gcd of top indices maybe not needed
-                        unordered_set<unsigned long long> memo;
-                        sol_top.assign(top_vals.size(), 0);
-                        bool ok = backtrack_bounded(top_vals, top_caps, 0, cand, sol_top, memo, t, time_limit);
-                        if (!ok) continue;
-                        // fill rest greedily to match S - cand
-                        int64 rem = S - cand;
-                        vector<int64> rest_fill(rest.size(), 0);
-                        // sort rest desc
-                        sort(rest.begin(), rest.end(), [](auto &A, auto &B){ return A.first > B.first; });
-                        for (size_t j=0;j<rest.size() && rem>0;++j) {
-                            int64 take = min(rest[j].second, rem / rest[j].first);
-                            rest_fill[j] = take * rest[j].first;
-                            rem -= rest_fill[j];
-                        }
-                        if (rem == 0) {
-                            // compose full_b for this segment
-                            // place top sol_top into full_b (we must match indices positions)
-                            for (size_t j=0;j<top_vals.size();++j) {
-                                int idx = (int)top_vals[j];
-                                full_b[idx-1] = sol_top[j] * top_vals[j];
-                            }
-                            // place rest_fill
-                            for (size_t j=0;j<rest.size();++j) {
-                                int idx = (int)rest[j].first;
-                                full_b[idx-1] = rest_fill[j];
-                            }
-                            found_any = true;
-                            break;
-                        }
-                    }
-                    if (!found_any) { segfail = true; break; }
-                }
-            }
-        } // for segments
-
-        if (!segfail) {
-            // verify full_b valid
-            bool ok = true;
-            for (int i=0;i<n;++i) {
-                if (full_b[i] < 0 || full_b[i] > a[i]) { ok = false; break; }
-                if (full_b[i] % (int64)(i+1) != 0) { ok = false; break; }
-            }
-            if (!ok) {
-                S -= l; ++attempts; continue;
-            }
-            int64 s1=0,s2=0,s3=0;
-            for (int i=0;i<p;i++) s1 += full_b[i];
-            for (int i=p;i<q;i++) s2 += full_b[i];
-            for (int i=q;i<n;i++) s3 += full_b[i];
-            if (s1==s2 && s2==s3 && s1>0) {
-                return full_b;
+// Residue DP optimization: reduce problem by gcd/residue to manageable DP.
+// We'll attempt DP on residues modulo m (smallest index in segment or gcd of indices).
+// Returns chosen b-values (multiples of index) or empty.
+vector<int64> residue_dp_fill(const vector<int64>& a, int L, int R, int64 S, double timeBudget, const Timer& globalTimer) {
+    // choose modulus m = gcd of indices in [L..R] or just pick smallest index L
+    int64 m = 0;
+    for (int i=L;i<=R;i++) m = gcd64(m, (int64)i);
+    if (m == 0) m = (int64)L;
+    if (m > 256) m = (int64)L; // keep small modulus
+    // DP over residues modulo m: keep best achievable sums for each residue using greedy-like large picks
+    int len = R - L + 1;
+    vector<int> vals(len);
+    vector<int64> caps(len);
+    for (int i=0;i<len;i++){ vals[i] = L + i; caps[i] = a[L+i-1] / (int64)(L+i); }
+    // residue DP: for each residue r (0..m-1) keep map sum->vector<multipliers> trimmed to small size
+    vector<unordered_map<int64, vector<int64>>> dp(2);
+    dp[0].clear();
+    dp[0][0] = vector<int64>(len, 0); // sum 0 achievable
+    int cur = 0, nxt = 1;
+    // iterate items large-first to bias toward big sums
+    vector<int> order(len);
+    iota(order.begin(), order.end(), 0);
+    sort(order.begin(), order.end(), [&](int p, int q){ return vals[p] > vals[q]; });
+    const int KEEP_PER_RES = 32;
+    for (int idx_order=0; idx_order<len; ++idx_order) {
+        if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return {};
+        int i = order[idx_order];
+        dp[nxt].clear();
+        int v = vals[i];
+        int64 capi = caps[i];
+        for (auto &kv : dp[cur]) {
+            int64 ssum = kv.first;
+            const vector<int64>& mults = kv.second;
+            // try k from 0..min(cap, (S-ssum)/v) but only a few top choices to limit branching
+            int64 kmax = min(capi, max<int64>(0, (S - ssum) / v));
+            int tries = 0;
+            for (int64 k = kmax; k >= 0 && tries < 5; --k, ++tries) {
+                int64 ns = ssum + k * v;
+                if (ns > S) continue;
+                // copy mults and set this idx
+                vector<int64> nm = mults;
+                nm[i] = k;
+                // store ns
+                // trim by residue and keep only top few sums
+                auto it = dp[nxt].find(ns);
+                if (it == dp[nxt].end()) dp[nxt][ns] = move(nm);
             }
         }
-        S -= l; ++attempts;
+        // compress dp[nxt] keep only sums <= S and trim size
+        if (dp[nxt].size() > 4096) {
+            // keep top KEEP_PER_RES sums per residue
+            vector<pair<int64, vector<int64>>> items;
+            items.reserve(dp[nxt].size());
+            for (auto &kv : dp[nxt]) if (kv.first <= S) items.emplace_back(kv.first, kv.second);
+            sort(items.begin(), items.end(), [](auto &A, auto &B){ return A.first > B.first; });
+            dp[nxt].clear();
+            int take = min((int)items.size(), 4096);
+            for (int t=0;t<take;t++) dp[nxt][items[t].first] = items[t].second;
+        }
+        swap(cur, nxt);
+    }
+    // now look for exact S
+    auto it = dp[cur].find(S);
+    if (it != dp[cur].end()) {
+        vector<int64> mults = it->second;
+        vector<int64> res(len,0);
+        for (int i=0;i<len;i++) res[i] = mults[i] * (int64)vals[i];
+        return res;
     }
     return {};
 }
 
-// Solve single case, return vector of operations (each op is vector<int64> b), or empty if impossible
-vector<vector<int64>> solve_case(vector<int64> a) {
-    Timer global_timer;
-    int n = (int)a.size();
-    vector<vector<int64>> ops;
-    if (accumulate(a.begin(), a.end(), (int64)0) == 0) return ops;
-    for (int step=0; step<OP_LIMIT && global_timer.elapsed() < GLOBAL_TIME_LIMIT; ++step) {
-        bool made_progress = false;
-        int64 total = accumulate(a.begin(), a.end(), (int64)0);
-        // heuristics: candidate p and q near total/3 and 2*total/3
-        vector<int64> ps = prefix_sum(a);
-        int64 t1 = total / 3;
-        int64 t2 = (2 * total) / 3;
-        vector<pair<int64,int>> clos1, clos2;
-        for (int i=1;i<n;i++) {
-            clos1.emplace_back( llabs(ps[i] - t1), i );
-            clos2.emplace_back( llabs(ps[i] - t2), i );
+// ------------------------ attempt a single (p,q) ------------------------
+// return b vector if found, else empty
+vector<int64> try_cut_construct(const Precompute& P, vector<int64>& a, int p, int q, const Timer& globalTimer) {
+    // enforce 1 <= p < q < n
+    int n = P.n;
+    if (!(1 <= p && p < q && q < n)) return {};
+    double startTime = globalTimer.elapsed();
+    Timer local;
+    // compute segment maxima
+    int L1=1,R1=p, L2=p+1,R2=q, L3=q+1,R3=n;
+    int64 mx1 = P.segmentMax(L1,R1), mx2 = P.segmentMax(L2,R2), mx3 = P.segmentMax(L3,R3);
+    if (mx1 == 0 || mx2 == 0 || mx3 == 0) return {};
+    int64 g1 = gcd_range_indices(L1,R1), g2 = gcd_range_indices(L2,R2), g3 = gcd_range_indices(L3,R3);
+    int64 l = g1;
+    l = lcm64(l, g2); l = lcm64(l, g3);
+    if (l <= 0) l = 1;
+    int64 maxS = min({mx1, mx2, mx3});
+    if (maxS <= 0) return {};
+    // try S descending (multiples of l)
+    int tries = 0;
+    int64 S = (maxS / l) * l;
+    while (S > 0 && tries < MAX_S_ATTEMPTS && globalTimer.elapsed() < GLOBAL_TIME_LIMIT) {
+        if (local.elapsed() > PER_CUT_TIME) break;
+        if (S > mx1 || S > mx2 || S > mx3) { S -= l; ++tries; continue; }
+        // for each segment attempt fill (small segment exact else greedy+residue fallback)
+        vector<int64> seg1, seg2, seg3;
+        int len1 = R1-L1+1, len2 = R2-L2+1, len3 = R3-L3+1;
+        bool fail=false;
+        // seg1
+        if (len1 <= 26) seg1 = solve_segment_small_exact(a, L1, R1, S, PER_CUT_TIME/3.0, globalTimer);
+        else { seg1 = greedy_fill(a, L1, R1, S); if (seg1.empty()) seg1 = residue_dp_fill(a, L1, R1, S, PER_CUT_TIME/3.0, globalTimer); }
+        if (seg1.empty()) { S -= l; ++tries; continue; }
+        // seg2
+        if (len2 <= 26) seg2 = solve_segment_small_exact(a, L2, R2, S, PER_CUT_TIME/3.0, globalTimer);
+        else { seg2 = greedy_fill(a, L2, R2, S); if (seg2.empty()) seg2 = residue_dp_fill(a, L2, R2, S, PER_CUT_TIME/3.0, globalTimer); }
+        if (seg2.empty()) { S -= l; ++tries; continue; }
+        // seg3
+        if (len3 <= 26) seg3 = solve_segment_small_exact(a, L3, R3, S, PER_CUT_TIME/3.0, globalTimer);
+        else { seg3 = greedy_fill(a, L3, R3, S); if (seg3.empty()) seg3 = residue_dp_fill(a, L3, R3, S, PER_CUT_TIME/3.0, globalTimer); }
+        if (seg3.empty()) { S -= l; ++tries; continue; }
+        // verify all segments sums equal S (they do by construction), combine b
+        vector<int64> b(n,0);
+        for (int i=0;i<len1;i++) b[L1 + i -1] = seg1[i];
+        for (int i=0;i<len2;i++) b[L2 + i -1] = seg2[i];
+        for (int i=0;i<len3;i++) b[L3 + i -1] = seg3[i];
+        // final validation
+        bool ok=true;
+        for (int i=0;i<n;i++) {
+            if (b[i] < 0 || b[i] > a[i]) { ok=false; break; }
+            if (b[i] % (int64)(i+1) != 0) { ok=false; break; }
         }
-        sort(clos1.begin(), clos1.end());
-        sort(clos2.begin(), clos2.end());
-        int cap_pick = min((int)clos1.size(), 60);
-        vector<int> cand_p, cand_q;
-        for (int i=0;i<cap_pick;i++) cand_p.push_back(clos1[i].second);
-        for (int i=0;i<cap_pick;i++) cand_q.push_back(clos2[i].second);
-        // try cross product but with pruning and time limits
-        double per_pair_time = 0.06; // seconds budget per p,q
-        for (int pi=0; pi<(int)cand_p.size() && global_timer.elapsed() < GLOBAL_TIME_LIMIT; ++pi) {
-            for (int qi=0; qi<(int)cand_q.size() && global_timer.elapsed() < GLOBAL_TIME_LIMIT; ++qi) {
-                int p = cand_p[pi], q = cand_q[qi];
+        if (!ok) { S -= l; ++tries; continue; }
+        // success
+        return b;
+    }
+    return {};
+}
+
+// Choose candidate p and q around thirds using prefix sums of a
+pair<vector<int>, vector<int>> choose_candidate_pq(const Precompute& P) {
+    int n = P.n;
+    vector<pair<int64,int>> v;
+    int64 total = P.prefA[n];
+    int64 t1 = total / 3;
+    int64 t2 = (2 * total) / 3;
+    for (int i=1;i<n;i++) {
+        v.emplace_back(llabs(P.prefA[i] - t1), i);
+    }
+    sort(v.begin(), v.end());
+    vector<int> candP; for (int i=0;i<min((int)v.size(), MAX_CAND_P); ++i) candP.push_back(v[i].second);
+    vector<pair<int64,int>> u;
+    for (int i=1;i<n;i++) u.emplace_back(llabs(P.prefA[i] - t2), i);
+    sort(u.begin(), u.end());
+    vector<int> candQ; for (int i=0;i<min((int)u.size(), MAX_CAND_Q); ++i) candQ.push_back(u[i].second);
+    return {candP, candQ};
+}
+
+// Top-level solve for one test case
+// Returns sequence of operations (each op is vector<int64> b), or empty vector if failed
+vector<vector<int64>> solve_one_case(vector<int64> a) {
+    Timer globalTimer;
+    int n = (int)a.size();
+    vector<vector<int64>> operations;
+    Precompute P(a);
+    if (P.prefA[n] == 0) return operations;
+    // limit number of operations
+    for (int op=0; op<MAX_OPS && globalTimer.elapsed() < GLOBAL_TIME_LIMIT; ++op) {
+        // recompute precompute for current a
+        Precompute curP(a);
+        auto [candP, candQ] = choose_candidate_pq(curP);
+        bool progress = false;
+        // attempt cross product of candidates (bounded)
+        for (int pi=0; pi<(int)candP.size() && globalTimer.elapsed() < GLOBAL_TIME_LIMIT && !progress; ++pi) {
+            for (int qi=0; qi<(int)candQ.size() && globalTimer.elapsed() < GLOBAL_TIME_LIMIT && !progress; ++qi) {
+                int p = candP[pi], q = candQ[qi];
                 if (!(1 <= p && p < q && q < n)) continue;
-                // cheap necessary checks
-                int64 mx1 = segment_max(a, 1, p);
-                int64 mx2 = segment_max(a, p+1, q);
-                int64 mx3 = segment_max(a, q+1, n);
-                if (mx1 == 0 || mx2 == 0 || mx3 == 0) continue;
-                int64 g1 = segment_gcd_indices(1,p), g2 = segment_gcd_indices(p+1,q), g3 = segment_gcd_indices(q+1,n);
-                int64 l = g1;
-                l = lcm64(l, g2); l = lcm64(l, g3);
-                if (l == 0) l = 1;
-                int64 maxS = min({mx1, mx2, mx3});
-                if (maxS <= 0) continue;
-                // call try_construct_for_cut with small per-pair time budget
-                vector<int64> b = try_construct_for_cut(a, p, q, per_pair_time, global_timer);
+                // cheap prunes: segmentMax>0
+                if (curP.segmentMax(1,p) == 0 || curP.segmentMax(p+1,q) == 0 || curP.segmentMax(q+1,n) == 0) continue;
+                // try build b
+                vector<int64> b = try_cut_construct(curP, a, p, q, globalTimer);
                 if (!b.empty()) {
-                    // apply operation
-                    ops.push_back(b);
-                    for (int i=0;i<n;++i) a[i] -= b[i];
-                    made_progress = true;
-                    break;
+                    // apply
+                    operations.push_back(b);
+                    for (int i=0;i<n;i++) a[i] -= b[i];
+                    progress = true;
                 }
             }
-            if (made_progress) break;
         }
-        if (!made_progress) {
-            // final attempt: if total divisible by 3, try brute forcing p,q with small extra budget
-            if (total % 3 == 0 && global_timer.elapsed() < GLOBAL_TIME_LIMIT) {
-                int64 S = total / 3;
-                bool found = false;
-                for (int p=1;p<n && !found && global_timer.elapsed() < GLOBAL_TIME_LIMIT; ++p) {
-                    for (int q=p+1;q<n && !found && global_timer.elapsed() < GLOBAL_TIME_LIMIT; ++q) {
-                        int64 mx1 = segment_max(a, 1, p);
-                        int64 mx2 = segment_max(a, p+1, q);
-                        int64 mx3 = segment_max(a, q+1, n);
-                        if (mx1 < S || mx2 < S || mx3 < S) continue;
-                        vector<int64> b = try_construct_for_cut(a, p, q, 0.08, global_timer);
+        if (!progress) {
+            // fallback: try brute p,q scan for total%3 scenario
+            int64 total = curP.prefA[n];
+            if (total % 3 == 0) {
+                int attempts = 0;
+                int64 S = total/3;
+                for (int p=1; p<n && attempts < 250 && globalTimer.elapsed() < GLOBAL_TIME_LIMIT && !progress; ++p) {
+                    for (int q=p+1; q<n && attempts < 250 && globalTimer.elapsed() < GLOBAL_TIME_LIMIT && !progress; ++q) {
+                        if (curP.segmentMax(1,p) < S || curP.segmentMax(p+1,q) < S || curP.segmentMax(q+1,n) < S) { ++attempts; continue; }
+                        vector<int64> b = try_cut_construct(curP, a, p, q, globalTimer);
+                        ++attempts;
                         if (!b.empty()) {
-                            ops.push_back(b);
-                            for (int i=0;i<n;++i) a[i] -= b[i];
-                            made_progress = true;
-                            found = true;
-                            break;
+                            operations.push_back(b);
+                            for (int i=0;i<n;i++) a[i] -= b[i];
+                            progress = true;
                         }
                     }
                 }
             }
         }
-        if (!made_progress) break;
+        if (!progress) break; // no possible next operation found
         // check if done
         bool allz = true;
-        for (auto v : a) if (v != 0) { allz = false; break; }
-        if (allz) return ops;
+        for (int i=0;i<n;i++) if (a[i] != 0) { allz = false; break; }
+        if (allz) return operations;
     }
-    // final check
+    // success?
     bool allz = true;
-    for (auto v : a) if (v != 0) { allz = false; break; }
-    if (allz) return ops;
-    return {}; // signal failure
+    for (int i=0;i<n;i++) if (a[i] != 0) { allz = false; break; }
+    if (allz) return operations;
+    // fail under resource limits
+    return {};
 }
 
-int main() {
+// Simple verifier: check that ops transform initial array to zeros under rules
+bool verify_solution(const vector<int64>& initial, const vector<vector<int64>>& ops) {
+    int n = (int)initial.size();
+    vector<int64> a = initial;
+    if (ops.empty()) {
+        for (int i=0;i<n;i++) if (a[i] != 0) return false;
+        return true;
+    }
+    for (auto &b : ops) {
+        if ((int)b.size() != n) return false;
+        // check 0 <= b[i] <= a[i], b[i] % (i+1) == 0
+        for (int i=0;i<n;i++) {
+            if (b[i] < 0 || b[i] > a[i]) return false;
+            if (b[i] % (int64)(i+1) != 0) return false;
+        }
+        // check existence of p,q where segment sums equal
+        bool found=false;
+        for (int p=1;p<n && !found;p++) for (int q=p+1; q<n && !found; q++) {
+            int64 s1=0,s2=0,s3=0;
+            for (int i=0;i<p;i++) s1 += b[i];
+            for (int i=p;i<q;i++) s2 += b[i];
+            for (int i=q;i<n;i++) s3 += b[i];
+            if (s1==s2 && s2==s3) found=true;
+        }
+        if (!found) return false;
+        for (int i=0;i<n;i++) a[i] -= b[i];
+    }
+    for (int i=0;i<n;i++) if (a[i] != 0) return false;
+    return true;
+}
+
+int main(){
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
-    int T;
-    if (!(cin >> T)) return 0;
-    // We will process each test case independently.
-    for (int tc=0; tc<T; ++tc) {
+    Timer globalAll;
+    int T; if (!(cin >> T)) return 0;
+    while (T--) {
         int n; cin >> n;
         vector<int64> a(n);
-        for (int i=0;i<n;++i) cin >> a[i];
-        vector<vector<int64>> ops = solve_case(a);
+        for (int i=0;i<n;i++) cin >> a[i];
+        auto ops = solve_one_case(a);
         if (ops.empty()) {
-            cout << "-1\n";
+            cout << -1 << "\n";
         } else {
-            cout << ops.size() << "\n";
-            for (auto &b : ops) {
-                for (int i=0;i<n;++i) {
-                    if (i) cout << ' ';
-                    cout << b[i];
+            // verify before printing (safety)
+            if (!verify_solution(a, ops)) {
+                // If verification fails, print -1 to avoid wrong outputs
+                cout << -1 << "\n";
+            } else {
+                cout << ops.size() << "\n";
+                for (auto &b : ops) {
+                    for (int i=0;i<n;i++) {
+                        if (i) cout << ' ';
+                        cout << b[i];
+                    }
+                    cout << "\n";
                 }
-                cout << "\n";
             }
         }
     }

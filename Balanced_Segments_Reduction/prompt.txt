@@ -48,3 +48,6 @@ Otherwise:
 Print s — the minimum number of operations found.
 
 Then print s lines, each containing the chosen b arrays (space-separated).
+
+
+
