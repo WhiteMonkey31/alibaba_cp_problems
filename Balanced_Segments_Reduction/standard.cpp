@@ -1,10 +1,6 @@
-// balanced_segments_optimized.cpp
-// Optimized hybrid solver for "Balanced Segments Reduction"
-// (three equal segments; b[i] divisible by i).
-//
-// Heuristic+exact approach tuned to be robust and LLM-resistant.
-//
-// Compile: g++ -O2 -std=gnu++17 balanced_segments_optimized.cpp -o balanced_solver
+// balanced_exact.cpp
+// Exact solver for "Balanced Segments Reduction" (three equal segments, b[i] divisible by i).
+// WARNING: exponential runtime in general. Best for small/moderate n.
 
 // #include <iostream>
 // #include<vector>
@@ -25,444 +21,286 @@
 
 // #include <cmath>
 #include <algorithm>
-// #include<unordered_set>
+#include<unordered_set>
+#include<queue>
+
+
 using namespace std;
 using int64 = long long;
 
-static const double GLOBAL_TIME_LIMIT = 1.8; // seconds per test case (soft)
-static const double PER_CUT_TIME = 0.045;    // seconds spent trying a single (p,q)
-static const int MAX_OPS = 50;               // fail after too many operations
-static const int MAX_S_ATTEMPTS = 180;       // per (p,q)
-static const int MAX_CAND_P = 48, MAX_CAND_Q = 48; // candidate ps and qs to try
+int MAX_DEPTH = 8;           // Increase with caution (exponential blow-up)
+double GLOBAL_TIME_LIMIT = 9.0; // seconds per test case
 
 struct Timer {
-    chrono::steady_clock::time_point s;
-    Timer() { s = chrono::steady_clock::now(); }
+    chrono::steady_clock::time_point start;
+    Timer() { start = chrono::steady_clock::now(); }
     double elapsed() const {
         using namespace chrono;
-        return chrono::duration_cast<duration<double>>(steady_clock::now() - s).count();
+        return duration_cast<duration<double>>(steady_clock::now() - start).count();
     }
 };
 
-int gcd(int a, int b) {
-    while (b != 0) {
-        a %= b;
-        std::swap(a, b);
-    }
-    return a;
+inline int64 gcd64(int64 a, int64 b) {
+    if (a == 0) return b;
+    if (b == 0) return a;
+    return std::gcd(a, b);
+}
+inline int64 lcm64(int64 a, int64 b) {
+    if (a == 0 || b == 0) return (a == 0 ? b : a);
+    return (a / gcd64(a,b)) * b;
 }
 
-inline int64 gcd64(int64 a, int64 b) { return b==0? a: gcd(a,b); }
-inline int64 lcm64(int64 a, int64 b) { if(a==0 || b==0) return a^b; return (a / gcd64(a,b)) * b; }
-
-// Precompute caps and prefix of cap-values for quick segment max queries
-struct Precompute {
-    int n;
-    vector<int64> a;
-    vector<int64> cap;       // cap[i] = floor(a[i]/(i+1))
-    vector<int64> capVal;    // capVal[i] = cap[i] * (i+1)
-    vector<int64> prefCapVal; // prefix sums of capVal
-    vector<int64> prefA;     // prefix sums of a
-    Precompute(const vector<int64>& arr) {
-        a = arr; n = (int)a.size();
-        cap.assign(n, 0);
-        capVal.assign(n, 0);
-        prefCapVal.assign(n+1, 0);
-        prefA.assign(n+1, 0);
-        for (int i=0;i<n;i++) {
-            cap[i] = a[i] / (int64)(i+1);
-            capVal[i] = cap[i] * (int64)(i+1);
-            prefCapVal[i+1] = prefCapVal[i] + capVal[i];
-            prefA[i+1] = prefA[i] + a[i];
-        }
+// Utility: convert vector to canonical string key
+string state_key(const vector<int64>& v) {
+    string s;
+    s.reserve(v.size()*12);
+    for (size_t i=0;i<v.size();++i) {
+        if (i) s.push_back(',');
+        s += to_string(v[i]);
     }
-    inline int64 segmentMax(int L, int R) const { // 1-based inclusive
-        if (L>R) return 0;
-        return prefCapVal[R] - prefCapVal[L-1];
-    }
-    inline int64 prefixA(int idx) const { return prefA[idx]; } // idx elements
-};
+    return s;
+}
 
-// helper to compute gcd of index range
-int64 gcd_range_indices(int L, int R) {
+// compute segment maximum achievable sum given caps floor(a[i]/i)
+int64 segment_max(const vector<int64>& a, int L, int R) {
+    // L, R are 1-based inclusive
+    int64 s = 0;
+    for (int i=L;i<=R;++i) {
+        int64 cap = a[i-1] / (int64)i;
+        s += cap * (int64)i;
+    }
+    return s;
+}
+int64 segment_gcd_indices(int L, int R) {
     int64 g = 0;
-    for (int i=L;i<=R;i++) g = gcd64(g, (int64)i);
+    for (int i=L;i<=R;++i) g = gcd64(g, (int64)i);
     return g;
 }
 
-// ------------------------ small-segment exact (meet-in-the-middle) ------------------------
-// Solve bounded subset-sum where coin values are distinct indices and multiplicities are caps.
-// For len <= 26 this is feasible by splitting into two halves.
-// We return vector<int64> of chosen b-values (each multiple of index), or empty vector on fail.
-// Note: target S must be <= segmentMax.
-vector<int64> solve_segment_small_exact(const vector<int64>& a, int L, int R, int64 S, double timeBudget, const Timer& globalTimer) {
-    // L,R are 1-based inclusive. Build values and caps
+// Generate all ways to fill indices [L..R] (1-based) so that sum equals target S
+// Each b[i] must be k_i * i where 0 <= k_i <= cap_i (cap_i = floor(a[i]/i)).
+// We'll produce solutions as vectors of b-values (length = R-L+1).
+// This enumerator is exponential; limit the number of returned solutions via max_sols.
+void gen_segment_solutions_backtrack(
+    const vector<int64>& a,
+    int L, int R,
+    int64 S,
+    vector<vector<int64>>& out_sols,
+    size_t max_sols,
+    const Timer& timer,
+    double time_limit
+) {
     int len = R - L + 1;
-    vector<int> vals(len);
-    vector<int64> caps(len);
-    for (int i=0;i<len;i++){ vals[i] = L + i; caps[i] = a[L+i-1] / (int64)(L+i); }
-    Timer t;
-    // transform to multi-coin list by handling multiplicities but keep as (value, cap)
-    // Meet-in-the-middle: enumerate possible sums in each half with multipliers
-    int mid = len / 2;
-    // Left half enumerations: vector of (sum, vector<multipliers for left half>)
-    unordered_map<int64, vector<int64>> leftMap;
-    // we'll cap enumerated combinations to prevent explosion
-    const size_t LEFT_LIMIT = 1 << min(18, max(0, mid)); // soft limit
-    // backtracking left half
-    function<void(int,int64, vector<int64>&)> dfsL = [&](int idx, int64 cur, vector<int64>& multi) {
-        if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return;
-        if (idx == mid) {
-            // store
-            leftMap[cur] = multi;
+    vector<int64> caps(len), idxs(len);
+    for (int j=0;j<len;++j) {
+        int idx = L + j;
+        idxs[j] = idx;
+        caps[j] = a[idx-1] / (int64)idx;
+    }
+    vector<int64> current(len, 0);
+
+    // Backtrack from rightmost to leftmost (try larger indices first) — often reduces branching
+    function<void(int,int64)> dfs = [&](int pos, int64 rem) {
+        if (timer.elapsed() > time_limit) return;
+        if (out_sols.size() >= max_sols) return;
+        if (rem < 0) return;
+        if (pos < 0) {
+            if (rem == 0) {
+                out_sols.push_back(current);
+            }
             return;
         }
-        int v = vals[idx]; int64 capc = caps[idx];
-        // iterate k from 0..min(cap, S/v) but prefer larger k first
-        int64 maxk = min(capc, S / v);
-        for (int64 k = maxk; k>=0; --k) {
-            if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return;
-            multi[idx] = k;
-            dfsL(idx+1, cur + k*(int64)v, multi);
-            if (leftMap.size() > LEFT_LIMIT) return;
+        int64 idx = idxs[pos];
+        int64 cap = caps[pos];
+        // choose k from max down to 0
+        int64 maxk = min(cap, rem / idx);
+        for (int64 k = maxk; k >= 0; --k) {
+            current[pos] = k * idx;
+            dfs(pos-1, rem - k*idx);
+            if (timer.elapsed() > time_limit) return;
+            if (out_sols.size() >= max_sols) return;
         }
-        multi[idx] = 0;
+        current[pos] = 0;
     };
-    vector<int64> mleft(len,0);
-    dfsL(0, 0, mleft);
-    if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return {};
-    // Right half
-    int rlen = len - mid;
-    const size_t RIGHT_LIMIT = 1 << min(18, max(0, rlen));
-    function<vector<int64>()> findSolution = [&]() -> vector<int64> {
-        vector<int64> mult(len,0);
-        // backtrack right half and lookup complement in leftMap
-        function<bool(int,int64, vector<int64>&)> dfsR = [&](int idx, int64 cur, vector<int64>& mr) -> bool {
-            if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return false;
-            if (idx == len) {
-                int64 need = S - cur;
-                auto it = leftMap.find(need);
-                if (it != leftMap.end()) {
-                    // combine
-                    for (int i=0;i<mid;i++) mult[i] = it->second[i];
-                    for (int i=mid;i<len;i++) mult[i] = mr[i-mid];
-                    return true;
-                }
-                return false;
-            }
-            int pos = idx - mid;
-            if (idx < mid) return false;
-            int v = vals[idx]; int64 capc = caps[idx];
-            int64 maxk = min(capc, S / v);
-            for (int64 k = maxk; k>=0; --k) {
-                mr[pos] = k;
-                if (dfsR(idx+1, cur + k*(int64)v, mr)) return true;
-                if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return false;
-            }
-            mr[pos] = 0;
-            return false;
-        };
-        vector<int64> mr(rlen,0);
-        if (dfsR(mid, 0, mr)) return mult;
-        return {};
-    };
-    vector<int64> mults = findSolution();
-    if (mults.empty()) return {};
-    // convert multipliers to b-values
-    vector<int64> bvals(len,0);
-    for (int i=0;i<len;i++) bvals[i] = mults[i] * (int64)vals[i];
-    return bvals;
+
+    dfs(len-1, S);
 }
 
-// ------------------------ greedy + residue DP fallback ------------------------
-// Greedy large-first attempt
-vector<int64> greedy_fill(const vector<int64>& a, int L, int R, int64 S) {
-    int len = R - L + 1;
-    vector<int64> out(len, 0);
-    int64 rem = S;
-    for (int i=R;i>=L;i--) {
-        int64 cap = a[i-1] / (int64)i;
-        if (cap <= 0) continue;
-        int64 take = min(cap, rem / (int64)i);
-        out[i-L] = take * (int64)i;
-        rem -= out[i-L];
-        if (rem == 0) break;
-    }
-    if (rem != 0) return {};
-    return out;
-}
-
-// Residue DP optimization: reduce problem by gcd/residue to manageable DP.
-// We'll attempt DP on residues modulo m (smallest index in segment or gcd of indices).
-// Returns chosen b-values (multiples of index) or empty.
-vector<int64> residue_dp_fill(const vector<int64>& a, int L, int R, int64 S, double timeBudget, const Timer& globalTimer) {
-    // choose modulus m = gcd of indices in [L..R] or just pick smallest index L
-    int64 m = 0;
-    for (int i=L;i<=R;i++) m = gcd64(m, (int64)i);
-    if (m == 0) m = (int64)L;
-    if (m > 256) m = (int64)L; // keep small modulus
-    // DP over residues modulo m: keep best achievable sums for each residue using greedy-like large picks
-    int len = R - L + 1;
-    vector<int> vals(len);
-    vector<int64> caps(len);
-    for (int i=0;i<len;i++){ vals[i] = L + i; caps[i] = a[L+i-1] / (int64)(L+i); }
-    // residue DP: for each residue r (0..m-1) keep map sum->vector<multipliers> trimmed to small size
-    vector<unordered_map<int64, vector<int64>>> dp(2);
-    dp[0].clear();
-    dp[0][0] = vector<int64>(len, 0); // sum 0 achievable
-    int cur = 0, nxt = 1;
-    // iterate items large-first to bias toward big sums
-    vector<int> order(len);
-    iota(order.begin(), order.end(), 0);
-    sort(order.begin(), order.end(), [&](int p, int q){ return vals[p] > vals[q]; });
-    const int KEEP_PER_RES = 32;
-    for (int idx_order=0; idx_order<len; ++idx_order) {
-        if (globalTimer.elapsed() > GLOBAL_TIME_LIMIT) return {};
-        int i = order[idx_order];
-        dp[nxt].clear();
-        int v = vals[i];
-        int64 capi = caps[i];
-        for (auto &kv : dp[cur]) {
-            int64 ssum = kv.first;
-            const vector<int64>& mults = kv.second;
-            // try k from 0..min(cap, (S-ssum)/v) but only a few top choices to limit branching
-            int64 kmax = min(capi, max<int64>(0, (S - ssum) / v));
-            int tries = 0;
-            for (int64 k = kmax; k >= 0 && tries < 5; --k, ++tries) {
-                int64 ns = ssum + k * v;
-                if (ns > S) continue;
-                // copy mults and set this idx
-                vector<int64> nm = mults;
-                nm[i] = k;
-                // store ns
-                // trim by residue and keep only top few sums
-                auto it = dp[nxt].find(ns);
-                if (it == dp[nxt].end()) dp[nxt][ns] = move(nm);
-            }
-        }
-        // compress dp[nxt] keep only sums <= S and trim size
-        if (dp[nxt].size() > 4096) {
-            // keep top KEEP_PER_RES sums per residue
-            vector<pair<int64, vector<int64>>> items;
-            items.reserve(dp[nxt].size());
-            for (auto &kv : dp[nxt]) if (kv.first <= S) items.emplace_back(kv.first, kv.second);
-            sort(items.begin(), items.end(), [](auto &A, auto &B){ return A.first > B.first; });
-            dp[nxt].clear();
-            int take = min((int)items.size(), 4096);
-            for (int t=0;t<take;t++) dp[nxt][items[t].first] = items[t].second;
-        }
-        swap(cur, nxt);
-    }
-    // now look for exact S
-    auto it = dp[cur].find(S);
-    if (it != dp[cur].end()) {
-        vector<int64> mults = it->second;
-        vector<int64> res(len,0);
-        for (int i=0;i<len;i++) res[i] = mults[i] * (int64)vals[i];
-        return res;
-    }
-    return {};
-}
-
-// ------------------------ attempt a single (p,q) ------------------------
-// return b vector if found, else empty
-vector<int64> try_cut_construct(const Precompute& P, vector<int64>& a, int p, int q, const Timer& globalTimer) {
-    // enforce 1 <= p < q < n
-    int n = P.n;
-    if (!(1 <= p && p < q && q < n)) return {};
-    double startTime = globalTimer.elapsed();
-    Timer local;
-    // compute segment maxima
-    int L1=1,R1=p, L2=p+1,R2=q, L3=q+1,R3=n;
-    int64 mx1 = P.segmentMax(L1,R1), mx2 = P.segmentMax(L2,R2), mx3 = P.segmentMax(L3,R3);
-    if (mx1 == 0 || mx2 == 0 || mx3 == 0) return {};
-    int64 g1 = gcd_range_indices(L1,R1), g2 = gcd_range_indices(L2,R2), g3 = gcd_range_indices(L3,R3);
-    int64 l = g1;
-    l = lcm64(l, g2); l = lcm64(l, g3);
-    if (l <= 0) l = 1;
-    int64 maxS = min({mx1, mx2, mx3});
-    if (maxS <= 0) return {};
-    // try S descending (multiples of l)
-    int tries = 0;
-    int64 S = (maxS / l) * l;
-    while (S > 0 && tries < MAX_S_ATTEMPTS && globalTimer.elapsed() < GLOBAL_TIME_LIMIT) {
-        if (local.elapsed() > PER_CUT_TIME) break;
-        if (S > mx1 || S > mx2 || S > mx3) { S -= l; ++tries; continue; }
-        // for each segment attempt fill (small segment exact else greedy+residue fallback)
-        vector<int64> seg1, seg2, seg3;
-        int len1 = R1-L1+1, len2 = R2-L2+1, len3 = R3-L3+1;
-        bool fail=false;
-        // seg1
-        if (len1 <= 26) seg1 = solve_segment_small_exact(a, L1, R1, S, PER_CUT_TIME/3.0, globalTimer);
-        else { seg1 = greedy_fill(a, L1, R1, S); if (seg1.empty()) seg1 = residue_dp_fill(a, L1, R1, S, PER_CUT_TIME/3.0, globalTimer); }
-        if (seg1.empty()) { S -= l; ++tries; continue; }
-        // seg2
-        if (len2 <= 26) seg2 = solve_segment_small_exact(a, L2, R2, S, PER_CUT_TIME/3.0, globalTimer);
-        else { seg2 = greedy_fill(a, L2, R2, S); if (seg2.empty()) seg2 = residue_dp_fill(a, L2, R2, S, PER_CUT_TIME/3.0, globalTimer); }
-        if (seg2.empty()) { S -= l; ++tries; continue; }
-        // seg3
-        if (len3 <= 26) seg3 = solve_segment_small_exact(a, L3, R3, S, PER_CUT_TIME/3.0, globalTimer);
-        else { seg3 = greedy_fill(a, L3, R3, S); if (seg3.empty()) seg3 = residue_dp_fill(a, L3, R3, S, PER_CUT_TIME/3.0, globalTimer); }
-        if (seg3.empty()) { S -= l; ++tries; continue; }
-        // verify all segments sums equal S (they do by construction), combine b
-        vector<int64> b(n,0);
-        for (int i=0;i<len1;i++) b[L1 + i -1] = seg1[i];
-        for (int i=0;i<len2;i++) b[L2 + i -1] = seg2[i];
-        for (int i=0;i<len3;i++) b[L3 + i -1] = seg3[i];
-        // final validation
-        bool ok=true;
-        for (int i=0;i<n;i++) {
-            if (b[i] < 0 || b[i] > a[i]) { ok=false; break; }
-            if (b[i] % (int64)(i+1) != 0) { ok=false; break; }
-        }
-        if (!ok) { S -= l; ++tries; continue; }
-        // success
-        return b;
-    }
-    return {};
-}
-
-// Choose candidate p and q around thirds using prefix sums of a
-pair<vector<int>, vector<int>> choose_candidate_pq(const Precompute& P) {
-    int n = P.n;
-    vector<pair<int64,int>> v;
-    int64 total = P.prefA[n];
-    int64 t1 = total / 3;
-    int64 t2 = (2 * total) / 3;
-    for (int i=1;i<n;i++) {
-        v.emplace_back(llabs(P.prefA[i] - t1), i);
-    }
-    sort(v.begin(), v.end());
-    vector<int> candP; for (int i=0;i<min((int)v.size(), MAX_CAND_P); ++i) candP.push_back(v[i].second);
-    vector<pair<int64,int>> u;
-    for (int i=1;i<n;i++) u.emplace_back(llabs(P.prefA[i] - t2), i);
-    sort(u.begin(), u.end());
-    vector<int> candQ; for (int i=0;i<min((int)u.size(), MAX_CAND_Q); ++i) candQ.push_back(u[i].second);
-    return {candP, candQ};
-}
-
-// Top-level solve for one test case
-// Returns sequence of operations (each op is vector<int64> b), or empty vector if failed
-vector<vector<int64>> solve_one_case(vector<int64> a) {
-    Timer globalTimer;
+// Given current array a, enumerate possible next states by producing all valid b arrays.
+// To avoid explosion, we restrict limits: S attempts limited and per-segment solutions limited.
+void enumerate_moves(
+    const vector<int64>& a,
+    vector<vector<int64>>& moves, // append full-length b arrays
+    const Timer& timer
+) {
     int n = (int)a.size();
-    vector<vector<int64>> operations;
-    Precompute P(a);
-    if (P.prefA[n] == 0) return operations;
-    // limit number of operations
-    for (int op=0; op<MAX_OPS && globalTimer.elapsed() < GLOBAL_TIME_LIMIT; ++op) {
-        // recompute precompute for current a
-        Precompute curP(a);
-        auto [candP, candQ] = choose_candidate_pq(curP);
-        bool progress = false;
-        // attempt cross product of candidates (bounded)
-        for (int pi=0; pi<(int)candP.size() && globalTimer.elapsed() < GLOBAL_TIME_LIMIT && !progress; ++pi) {
-            for (int qi=0; qi<(int)candQ.size() && globalTimer.elapsed() < GLOBAL_TIME_LIMIT && !progress; ++qi) {
-                int p = candP[pi], q = candQ[qi];
-                if (!(1 <= p && p < q && q < n)) continue;
-                // cheap prunes: segmentMax>0
-                if (curP.segmentMax(1,p) == 0 || curP.segmentMax(p+1,q) == 0 || curP.segmentMax(q+1,n) == 0) continue;
-                // try build b
-                vector<int64> b = try_cut_construct(curP, a, p, q, globalTimer);
-                if (!b.empty()) {
-                    // apply
-                    operations.push_back(b);
-                    for (int i=0;i<n;i++) a[i] -= b[i];
-                    progress = true;
-                }
-            }
-        }
-        if (!progress) {
-            // fallback: try brute p,q scan for total%3 scenario
-            int64 total = curP.prefA[n];
-            if (total % 3 == 0) {
-                int attempts = 0;
-                int64 S = total/3;
-                for (int p=1; p<n && attempts < 250 && globalTimer.elapsed() < GLOBAL_TIME_LIMIT && !progress; ++p) {
-                    for (int q=p+1; q<n && attempts < 250 && globalTimer.elapsed() < GLOBAL_TIME_LIMIT && !progress; ++q) {
-                        if (curP.segmentMax(1,p) < S || curP.segmentMax(p+1,q) < S || curP.segmentMax(q+1,n) < S) { ++attempts; continue; }
-                        vector<int64> b = try_cut_construct(curP, a, p, q, globalTimer);
-                        ++attempts;
-                        if (!b.empty()) {
-                            operations.push_back(b);
-                            for (int i=0;i<n;i++) a[i] -= b[i];
-                            progress = true;
+    // parameters to control explosion:
+    const size_t MAX_SOL_PER_SEG = 500;    // max solutions we collect per segment per S
+    const int MAX_S_ATTEMPTS_PER_CUT = 200; // max different S tried per (p,q)
+    const double PER_CUT_TIME = 0.15;      // seconds per (p,q)
+    // iterate p,q
+    for (int p=1;p<=n-2;++p) {
+        for (int q=p+1;q<=n-1;++q) {
+            if (timer.elapsed() > GLOBAL_TIME_LIMIT) return;
+            // compute segment maxes and gcds
+            int64 mx1 = segment_max(a, 1, p);
+            int64 mx2 = segment_max(a, p+1, q);
+            int64 mx3 = segment_max(a, q+1, n);
+            if (mx1 == 0 || mx2 == 0 || mx3 == 0) continue;
+            int64 g1 = segment_gcd_indices(1,p);
+            int64 g2 = segment_gcd_indices(p+1,q);
+            int64 g3 = segment_gcd_indices(q+1,n);
+            int64 l = g1;
+            l = lcm64(l, g2);
+            l = lcm64(l, g3);
+            if (l == 0) l = 1;
+            int64 maxS = min({mx1, mx2, mx3});
+            if (maxS <= 0) continue;
+            // start from highest S multiple of l
+            int64 S = (maxS / l) * l;
+            int attempts = 0;
+            Timer cutTimer;
+            while (S > 0 && attempts < MAX_S_ATTEMPTS_PER_CUT && cutTimer.elapsed() < PER_CUT_TIME && timer.elapsed() < GLOBAL_TIME_LIMIT) {
+                // quick check
+                if (S > mx1 || S > mx2 || S > mx3) { S -= l; ++attempts; continue; }
+                // generate per-segment solutions (with caps)
+                vector<vector<int64>> sol1, sol2, sol3;
+                double per_seg_time = min( (PER_CUT_TIME / 3.0), 0.04 );
+                gen_segment_solutions_backtrack(a, 1, p, S, sol1, MAX_SOL_PER_SEG, cutTimer, per_seg_time);
+                if (sol1.empty()) { S -= l; ++attempts; continue; }
+                gen_segment_solutions_backtrack(a, p+1, q, S, sol2, MAX_SOL_PER_SEG, cutTimer, per_seg_time);
+                if (sol2.empty()) { S -= l; ++attempts; continue; }
+                gen_segment_solutions_backtrack(a, q+1, n, S, sol3, MAX_SOL_PER_SEG, cutTimer, per_seg_time);
+                if (sol3.empty()) { S -= l; ++attempts; continue; }
+                // now we have lists; combine them to full b arrays
+                // cap total combinations to avoid explosion
+                size_t cap_total_combinations = 2000;
+                size_t count = 0;
+                for (auto &v1: sol1) {
+                    for (auto &v2: sol2) {
+                        for (auto &v3: sol3) {
+                            vector<int64> b(n, 0);
+                            // copy v1 into b[0..p-1]
+                            for (int i=0;i<(int)v1.size();++i) b[i] = v1[i];
+                            for (int i=0;i<(int)v2.size();++i) b[p + i] = v2[i];
+                            for (int i=0;i<(int)v3.size();++i) b[q + i] = v3[i];
+                            // validate b <= a (should hold by construction)
+                            bool ok = true;
+                            for (int i=0;i<n;++i) {
+                                if (b[i] < 0 || b[i] > a[i]) { ok = false; break; }
+                                if (b[i] % (i+1) != 0) { ok = false; break; }
+                            }
+                            if (!ok) continue;
+                            // ensure segment sums equal S (should hold)
+                            int64 s1=0,s2=0,s3=0;
+                            for (int i=0;i<p;++i) s1 += b[i];
+                            for (int i=p;i<q;++i) s2 += b[i];
+                            for (int i=q;i<n;++i) s3 += b[i];
+                            if (s1==S && s2==S && s3==S) {
+                                moves.push_back(b);
+                                ++count;
+                                if (count >= cap_total_combinations) break;
+                            }
                         }
+                        if (count >= cap_total_combinations) break;
                     }
+                    if (count >= cap_total_combinations) break;
                 }
+                // done with this S
+                S -= l;
+                ++attempts;
+            } // S loop
+            if (timer.elapsed() > GLOBAL_TIME_LIMIT) return;
+        } // q
+    } // p
+}
+
+// BFS search to find minimal operations
+// returns vector of operations (each vector<int64> b), or empty if impossible within limits
+vector<vector<int64>> find_min_operations_exact(vector<int64> start) {
+    Timer timer;
+    int n = (int)start.size();
+    // trivial
+    bool allzero = true;
+    for (auto x : start) if (x != 0) { allzero = false; break; }
+    if (allzero) return {};
+    // BFS
+    queue<pair<vector<int64>, vector<vector<int64>>>> q; // state, ops so far
+    unordered_set<string> seen;
+    string key0 = state_key(start);
+    q.push({start, {}});
+    seen.insert(key0);
+
+    int depth = 0;
+    while (!q.empty()) {
+        auto cur = q.front(); q.pop();
+        vector<int64> a = cur.first;
+        vector<vector<int64>> ops_so_far = cur.second;
+        if ((int)ops_so_far.size() > MAX_DEPTH) continue;
+        // check time
+        if (timer.elapsed() > GLOBAL_TIME_LIMIT) break;
+        // enumerate moves from a
+        vector<vector<int64>> moves;
+        enumerate_moves(a, moves, timer);
+        // sort/make unique moves to reduce duplicates
+        // we will proceed through moves
+        for (auto &b : moves) {
+            // apply
+            vector<int64> nxt(n);
+            bool ok = true;
+            for (int i=0;i<n;++i) {
+                if (b[i] < 0 || b[i] > a[i]) { ok = false; break; }
+                nxt[i] = a[i] - b[i];
             }
+            if (!ok) continue;
+            // check zero
+            bool iszero = true;
+            for (auto v : nxt) if (v != 0) { iszero = false; break; }
+            vector<vector<int64>> ops_next = ops_so_far;
+            ops_next.push_back(b);
+            if (iszero) return ops_next; // BFS ensures minimal ops
+            string k = state_key(nxt);
+            if (!seen.count(k)) {
+                seen.insert(k);
+                q.push({nxt, ops_next});
+            }
+            // small time check
+            if (timer.elapsed() > GLOBAL_TIME_LIMIT) break;
         }
-        if (!progress) break; // no possible next operation found
-        // check if done
-        bool allz = true;
-        for (int i=0;i<n;i++) if (a[i] != 0) { allz = false; break; }
-        if (allz) return operations;
+        if (timer.elapsed() > GLOBAL_TIME_LIMIT) break;
     }
-    // success?
-    bool allz = true;
-    for (int i=0;i<n;i++) if (a[i] != 0) { allz = false; break; }
-    if (allz) return operations;
-    // fail under resource limits
-    return {};
+    // if we exit BFS without reaching zero
+    return {}; // empty -> no solution found within limits/time
 }
 
-// Simple verifier: check that ops transform initial array to zeros under rules
-bool verify_solution(const vector<int64>& initial, const vector<vector<int64>>& ops) {
-    int n = (int)initial.size();
-    vector<int64> a = initial;
-    if (ops.empty()) {
-        for (int i=0;i<n;i++) if (a[i] != 0) return false;
-        return true;
-    }
-    for (auto &b : ops) {
-        if ((int)b.size() != n) return false;
-        // check 0 <= b[i] <= a[i], b[i] % (i+1) == 0
-        for (int i=0;i<n;i++) {
-            if (b[i] < 0 || b[i] > a[i]) return false;
-            if (b[i] % (int64)(i+1) != 0) return false;
-        }
-        // check existence of p,q where segment sums equal
-        bool found=false;
-        for (int p=1;p<n && !found;p++) for (int q=p+1; q<n && !found; q++) {
-            int64 s1=0,s2=0,s3=0;
-            for (int i=0;i<p;i++) s1 += b[i];
-            for (int i=p;i<q;i++) s2 += b[i];
-            for (int i=q;i<n;i++) s3 += b[i];
-            if (s1==s2 && s2==s3) found=true;
-        }
-        if (!found) return false;
-        for (int i=0;i<n;i++) a[i] -= b[i];
-    }
-    for (int i=0;i<n;i++) if (a[i] != 0) return false;
-    return true;
-}
-
-int main(){
+// ---------- I/O and main ----------
+int main() {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
-    Timer globalAll;
-    int T; if (!(cin >> T)) return 0;
-    while (T--) {
+
+    int T;
+    if (!(cin >> T)) return 0;
+    for (int tc=0; tc<T; ++tc) {
         int n; cin >> n;
         vector<int64> a(n);
-        for (int i=0;i<n;i++) cin >> a[i];
-        auto ops = solve_one_case(a);
+        for (int i=0;i<n;++i) cin >> a[i];
+
+        // Optional: for interactive tuning you can set MAX_DEPTH or GLOBAL_TIME_LIMIT based on n
+        if (n <= 6) { MAX_DEPTH = 10; GLOBAL_TIME_LIMIT = 6.0; }
+        else if (n <= 8) { MAX_DEPTH = 8; GLOBAL_TIME_LIMIT = 7.5; }
+        else { MAX_DEPTH = 6; GLOBAL_TIME_LIMIT = 9.0; }
+
+        auto ops = find_min_operations_exact(a);
         if (ops.empty()) {
             cout << -1 << "\n";
         } else {
-            // verify before printing (safety)
-            if (!verify_solution(a, ops)) {
-                // If verification fails, print -1 to avoid wrong outputs
-                cout << -1 << "\n";
-            } else {
-                cout << ops.size() << "\n";
-                for (auto &b : ops) {
-                    for (int i=0;i<n;i++) {
-                        if (i) cout << ' ';
-                        cout << b[i];
-                    }
-                    cout << "\n";
+            cout << ops.size() << "\n";
+            for (auto &b : ops) {
+                for (int i=0;i<n;++i) {
+                    if (i) cout << ' ';
+                    cout << b[i];
                 }
+                cout << "\n";
             }
         }
     }
