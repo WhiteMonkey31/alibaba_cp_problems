@@ -61,20 +61,18 @@ After performing the `s` operations in order, all elements of `a` must be zero.
 
 ## Sample Input
 3
-4
-6 6 6 6
+3
+6 6 6
 3
 2 5 3
-5
-10 5 15 20 25
+2
+10 5
 
 ## Sample Output
 1
-6 6 6 6
+6 6 6
 -1
-2
-5 5 5 5 5
-5 0 10 15 20
+-1
 
 ---
 

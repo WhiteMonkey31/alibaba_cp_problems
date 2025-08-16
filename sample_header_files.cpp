@@ -1,10 +1,10 @@
-// #include <iostream>
-// #include<vector>
+
+#include<vector>
 #include <iostream>
-// #include <fstream>
-// #include <sstream>
-// #include <string>
-// #include <atomic>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -14,10 +14,11 @@
 #include<unordered_map>
 #include<functional>
 #include<utility>
-
-// #include <cmath>
+#include <cmath>
 #include <algorithm>
-// #include<unordered_set>
+#include<unordered_set>
+#include<random>
+
 
 
 int gcd(int a, int b) {

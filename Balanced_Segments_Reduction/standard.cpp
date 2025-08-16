@@ -1,6 +1,4 @@
-// balanced_exact.cpp
-// Exact solver for "Balanced Segments Reduction" (three equal segments, b[i] divisible by i).
-// WARNING: exponential runtime in general. Best for small/moderate n.
+
 
 // #include <iostream>
 // #include<vector>
@@ -13,11 +11,13 @@
 #include <cstdlib>
 #include <ctime>
 #include <vector>
-#include<numeric>
-#include<array>
-#include<unordered_map>
+// #include<numeric>
+// #include<array>
+// #include<unordered_map>
 #include<functional>
 #include<utility>
+#include<string>
+
 
 // #include <cmath>
 #include <algorithm>
@@ -40,10 +40,20 @@ struct Timer {
     }
 };
 
+
+int gcd(int a, int b) {
+    while (b != 0) {
+        a %= b;
+        std::swap(a, b);
+    }
+    return a;
+}
+
+
 inline int64 gcd64(int64 a, int64 b) {
     if (a == 0) return b;
     if (b == 0) return a;
-    return std::gcd(a, b);
+    return gcd(a, b);
 }
 inline int64 lcm64(int64 a, int64 b) {
     if (a == 0 || b == 0) return (a == 0 ? b : a);
@@ -77,10 +87,7 @@ int64 segment_gcd_indices(int L, int R) {
     return g;
 }
 
-// Generate all ways to fill indices [L..R] (1-based) so that sum equals target S
-// Each b[i] must be k_i * i where 0 <= k_i <= cap_i (cap_i = floor(a[i]/i)).
-// We'll produce solutions as vectors of b-values (length = R-L+1).
-// This enumerator is exponential; limit the number of returned solutions via max_sols.
+
 void gen_segment_solutions_backtrack(
     const vector<int64>& a,
     int L, int R,
